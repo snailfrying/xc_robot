@@ -1,0 +1,12 @@
+{
+  "points": [
+    {
+      "point_id": "home",
+      "aliases": ["home", "起点", "起始点", "回原点", "回家点"]
+    },
+    {
+      "point_id": "work",
+      "aliases": ["work", "工作点", "工位", "工作位", "去工作点"]
+    }
+  ]
+}

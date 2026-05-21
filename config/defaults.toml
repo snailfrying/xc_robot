@@ -1,0 +1,88 @@
+[project]
+name = "xc_rebot_react_agent"
+session_prefix = "xc-rebot"
+
+[robot_api]
+base_url = "http://10.10.92.174:8080/api/v1"
+request_timeout_sec = 8.0
+status_poll_interval_sec = 0.8
+status_transition_timeout_sec = 6.0
+navigation_timeout_sec = 240.0
+navigation_terminal_grace_sec = 2.0
+
+[robot_api.capture]
+enabled = true
+include_depth = false
+return_mode = "url"
+request_timeout_sec = 15.0
+prefer_inline_if_available = true
+
+[llm]
+enabled = true
+api_url = ""
+api_key = ""
+model_name = ""
+request_timeout_sec = 90.0
+temperature = 0.0
+max_retries = 1
+
+[planner]
+max_steps = 12
+history_window = 6
+confidence_floor = 0.25
+allow_llm_point_resolution = true
+allow_vlm_exploration = true
+force_stop_on_low_confidence = true
+
+[point_resolution]
+local_alias_file = "config/point_aliases.json"
+minimum_confidence = 0.72
+max_candidates = 5
+exact_match_confidence = 1.0
+substring_match_confidence = 0.92
+reverse_substring_match_confidence = 0.82
+
+[routing]
+react_confidence = 0.5
+
+[executor.stop]
+reason = "planner_sync_stop"
+transition_timeout_sec = 5.0
+poll_interval_sec = 0.5
+
+[executor.manual_profiles.explore_forward]
+endpoint = "forward"
+speed_level = "slow"
+pulse_sec = 1.0
+settle_sec = 0.8
+status_expect_state = "manual"
+
+[executor.manual_profiles.explore_backward]
+endpoint = "backward"
+speed_level = "slow"
+pulse_sec = 0.8
+settle_sec = 0.8
+status_expect_state = "manual"
+
+[executor.manual_profiles.explore_left]
+endpoint = "left"
+speed_level = "slow"
+pulse_sec = 0.7
+settle_sec = 0.8
+status_expect_state = "manual"
+
+[executor.manual_profiles.explore_right]
+endpoint = "right"
+speed_level = "slow"
+pulse_sec = 0.7
+settle_sec = 0.8
+status_expect_state = "manual"
+
+[logging]
+directory = "runtime_logs"
+level = "INFO"
+console = true
+file = true
+session_trace_enabled = true
+max_bytes = 2097152
+backup_count = 5
