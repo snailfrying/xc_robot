@@ -4,7 +4,11 @@ from ..errors import PlannerError
 from ..models import PointOfInterest
 from ..models import TaskPlan
 from ..models import TaskSubgoal
+from .action_parser import format_action_call
+from .action_parser import parse_action_payload
 from .chassis_intent_rules import detect_explicit_chassis_intent
+from .chassis_intent_rules import has_scene_exploration_intent
+from .chassis_intent_rules import split_explicit_motion_steps
 from .chassis_intent_rules import split_ordered_subgoals
 from .contracts import build_task_decomposition_contract
 from .prompts import build_task_decomposition_system_prompt
@@ -21,7 +25,7 @@ class GoalRouter:
         clauses = self._decompose_goal(goal_text, points)
         subgoals: list[TaskSubgoal] = []
         for sequence_id, clause in enumerate(clauses, start=1):
-            subgoals.append(self._build_subgoal(clause, points, sequence_id=sequence_id))
+            subgoals.extend(self._expand_subgoals(clause, points, sequence_id_start=len(subgoals) + 1))
 
         if len(subgoals) == 1:
             subgoal = subgoals[0]
@@ -46,6 +50,15 @@ class GoalRouter:
         *,
         sequence_id: int,
     ) -> TaskSubgoal:
+        if has_scene_exploration_intent(goal_text):
+            return TaskSubgoal(
+                sequence_id=sequence_id,
+                route="scene_exploration",
+                goal_text=goal_text,
+                reason="goal asks to search, inspect, locate, or explain something in the scene; keep motion decisions inside visual exploration",
+                confidence=self._settings.routing.react_confidence,
+                planner_profile_hint="scene_exploration",
+            )
         semantic_hint = detect_explicit_chassis_intent(goal_text)
         if semantic_hint is not None:
             return TaskSubgoal(
@@ -79,6 +92,35 @@ class GoalRouter:
             confidence=self._settings.routing.react_confidence,
             planner_profile_hint="scene_exploration",
         )
+
+    def _expand_subgoals(
+        self,
+        goal_text: str,
+        points: list[PointOfInterest],
+        *,
+        sequence_id_start: int,
+    ) -> list[TaskSubgoal]:
+        seed = self._build_subgoal(goal_text, points, sequence_id=sequence_id_start)
+        if seed.route != "manual_motion" or not seed.action:
+            return [seed]
+        action_steps = split_explicit_motion_steps(seed.action)
+        if len(action_steps) <= 1:
+            return [seed]
+        expanded: list[TaskSubgoal] = []
+        for offset, action in enumerate(action_steps):
+            expanded.append(
+                TaskSubgoal(
+                    sequence_id=sequence_id_start + offset,
+                    route=seed.route,
+                    goal_text=seed.goal_text,
+                    reason=f"{seed.reason}; segmented explicit motion step {offset + 1}/{len(action_steps)} for visual re-check",
+                    confidence=seed.confidence,
+                    planner_profile_hint=seed.planner_profile_hint,
+                    action=action,
+                    action_expression=format_action_call(parse_action_payload(action)),
+                )
+            )
+        return expanded
 
     def _decompose_goal(self, goal_text: str, points: list[PointOfInterest]) -> list[str]:
         stripped_goal = goal_text.strip()

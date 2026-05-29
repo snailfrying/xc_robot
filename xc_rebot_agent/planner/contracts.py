@@ -31,14 +31,14 @@ def build_navigation_sequence_workflow_contract() -> dict[str, object]:
 def build_motion_sequence_workflow_contract() -> dict[str, object]:
     return {
         "goal_priority": "Complete the current explicit chassis subgoal only.",
-        "react_rule": "Observe the newest result, choose one atomic chassis action, execute it synchronously, then evaluate again.",
+        "react_rule": "Observe the newest image and result, choose one conservative atomic chassis action, execute it synchronously, then evaluate again.",
         "router_hint_rule": "If current_subgoal.action or router_action_hint is present, it is the preferred deterministic action for this subgoal unless the newest evidence makes it unsafe.",
-        "evidence_rule": "Use fresh_runtime_evidence as the first-pass compact evidence layer, then inspect observation_metadata only when more safety detail is needed.",
-        "motion_rule": "Use configured semantic move_* or turn_* actions instead of inventing raw physical constants.",
+        "evidence_rule": "Use fresh_runtime_evidence as the first-pass compact evidence layer, treat structured scene understanding as the primary safety evidence when available, and treat the newest visual observation as required safety evidence before non-stop motion.",
+        "motion_rule": "Use configured semantic move_* or turn_* actions instead of inventing raw physical constants, and keep each explicit move or turn conservative enough to re-check safety on the next turn.",
         "action_constraint_rule": "Allowed actions are move_forward, move_backward, turn_left, turn_right, stop, or finish_task only.",
         "state_constraint_rule": "Use subgoal_state=continue for move_*/turn_* actions, subgoal_state=completed for finish_task or an explicit stop_request stop, and subgoal_state=blocked for fail-closed stop.",
         "completion_rule": "If the previous synchronous motion already completed the current subgoal, return finish_task().",
-        "safety_rule": "Use stop(reason_key) when an immediate halt is safer than continuing the current motion.",
+        "safety_rule": "Use stop(reason_key) when structured scene understanding or fresh visual evidence is missing, weak, or suggests that continuing the motion could be unsafe.",
         "parsing_rule": "Return valid JSON only and keep action as an object with keys name and args.",
     }
 
@@ -48,12 +48,12 @@ def build_scene_exploration_workflow_contract() -> dict[str, object]:
         "goal_priority": "Use the newest real observation and result to improve visibility, approach, or navigation progress safely.",
         "react_rule": "Operate one strict serial step at a time: observe, choose one action, execute, then observe again.",
         "freshness_rule": "The newest status, newest execution result, and newest image are the source of truth for this turn.",
-        "evidence_rule": "Use fresh_runtime_evidence as the compact primary evidence layer and memory_digest only as background context.",
+        "evidence_rule": "Use fresh_runtime_evidence as the compact primary evidence layer, prioritize structured scene understanding when available, and use memory_digest only as background context.",
         "completion_rule": "Only finish when the newest evidence confirms the current subgoal is complete; otherwise stop if blocked.",
         "navigation_rule": "If a map point can now satisfy the current subgoal, use navigate(point_id) instead of more blind search.",
         "map_truth_rule": "known_points and current_navigation_context are available every turn and must be consulted before deciding that navigation is impossible or unnecessary.",
         "state_constraint_rule": "Use subgoal_state=continue while still exploring, subgoal_state=completed only with finish_task, and subgoal_state=blocked with stop.",
-        "safety_rule": "If the evidence is weak or unsafe before completion, choose stop(reason_key) instead of guessing; do not use move_forward without fresh visual evidence and a clear confidence margin.",
+        "safety_rule": "If the evidence is weak or unsafe before completion, choose stop(reason_key) instead of guessing; do not use move_forward without fresh visual evidence, structured scene approval when available, and a clear confidence margin.",
         "serial_rule": "Every action must depend on the newest confirmed result from the immediately previous action.",
         "parsing_rule": "Return valid JSON only and keep action as an object with keys name and args.",
     }

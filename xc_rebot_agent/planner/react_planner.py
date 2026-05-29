@@ -85,6 +85,7 @@ class ReactiveScenePlanner:
                 status=status,
                 points=points,
                 latest_execution=latest_execution or {},
+                observation=observation,
             )
             decision = self._apply_profile_guardrail(
                 decision=decision,
@@ -197,7 +198,7 @@ class ReactiveScenePlanner:
             "fresh_runtime_evidence": {
                 "robot_status_digest": status.short_dict(),
                 "latest_execution_digest": self._compact_execution_result(latest_execution),
-                "observation_digest": observation.short_dict() if observation is not None else {},
+                "observation_digest": self._build_observation_digest(observation),
             },
             "robot_status": status.raw,
             "matched_point_hint": matched_point_hint,
@@ -214,11 +215,12 @@ class ReactiveScenePlanner:
                 "recent_history": self._compact_history(history),
                 "session_memory": self._compact_session_context(session_context),
             },
-            "observation_metadata": observation.raw if observation is not None else {},
+            "observation_metadata": self._build_observation_metadata(observation),
             "freshness_contract": {
                 "status_truth": "robot_status is the newest API-confirmed state for this turn",
                 "execution_truth": "latest_execution_result is the newest confirmed result from the previous synchronous action",
                 "image_truth": "if an image is provided, it is the newest visual evidence for this turn",
+                "structured_scene_truth": "if structured scene understanding is provided, treat it as the newest machine-readable safety evidence for this turn",
                 "conflict_rule": "prefer the newest status/result/image over older memory whenever they conflict",
             },
             "specialist_roles": {
@@ -326,19 +328,19 @@ class ReactiveScenePlanner:
         allowed_actions_by_profile = {
             "navigation_sequence": ["navigate(point_id)", "stop(reason_key)", "finish_task()"],
             "motion_sequence": [
-                "move_forward(profile_name)",
-                "move_backward(profile_name)",
-                "turn_left(profile_name)",
-                "turn_right(profile_name)",
+                "move_forward(profile_name, optional distance_m)",
+                "move_backward(profile_name, optional distance_m)",
+                "turn_left(profile_name, optional angle_deg)",
+                "turn_right(profile_name, optional angle_deg)",
                 "stop(reason_key)",
                 "finish_task()",
             ],
             "scene_exploration": [
                 "navigate(point_id)",
-                "move_forward(profile_name)",
-                "move_backward(profile_name)",
-                "turn_left(profile_name)",
-                "turn_right(profile_name)",
+                "move_forward(profile_name, optional distance_m)",
+                "move_backward(profile_name, optional distance_m)",
+                "turn_left(profile_name, optional angle_deg)",
+                "turn_right(profile_name, optional angle_deg)",
                 "stop(reason_key)",
                 "finish_task()",
             ],
@@ -377,6 +379,22 @@ class ReactiveScenePlanner:
             "status_after": latest_execution.get("status_after", {}),
         }
 
+    def _build_observation_digest(self, observation: CaptureObservation | None) -> dict[str, object]:
+        if observation is None:
+            return {}
+        digest = observation.short_dict()
+        if observation.scene_understanding is not None:
+            digest["scene_understanding"] = observation.scene_understanding.short_dict()
+        return digest
+
+    def _build_observation_metadata(self, observation: CaptureObservation | None) -> dict[str, object]:
+        if observation is None:
+            return {}
+        metadata = dict(observation.raw)
+        if observation.scene_understanding is not None:
+            metadata["scene_understanding"] = observation.scene_understanding.raw
+        return metadata
+
     def _compact_history(self, history: list[dict[str, object]]) -> list[dict[str, object]]:
         compact: list[dict[str, object]] = []
         for item in history[-self._settings.planner.history_window :]:
@@ -412,6 +430,82 @@ class ReactiveScenePlanner:
             )
         return compact
 
+    def _scene_understanding_available(self, observation: CaptureObservation | None) -> bool:
+        return observation is not None and observation.scene_understanding is not None
+
+    def _scene_understanding_required(self, profile_name: str) -> bool:
+        return (
+            profile_name in {"motion_sequence", "scene_exploration"}
+            and self._settings.vision.enabled
+            and self._settings.vision.prefer_structured_scene
+        )
+
+    def _scene_is_trustworthy(self, observation: CaptureObservation | None) -> bool:
+        scene = observation.scene_understanding if observation is not None else None
+        if scene is None:
+            return False
+        if scene.confidence < self._settings.vision.minimum_confidence:
+            return False
+        flags = scene.flags
+        if flags.depth_reliable is False:
+            return False
+        return True
+
+    def _forward_motion_is_safe(self, observation: CaptureObservation | None) -> bool:
+        scene = observation.scene_understanding if observation is not None else None
+        if scene is None:
+            return True
+        if not self._scene_is_trustworthy(observation):
+            return False
+        if scene.flags.safe_to_advance is not True:
+            return False
+        clearance = scene.obstacles.forward_clearance_m
+        if clearance is None:
+            return False
+        return clearance >= self._settings.vision.minimum_forward_clearance_m
+
+    def _backward_motion_is_safe(self, observation: CaptureObservation | None) -> bool:
+        scene = observation.scene_understanding if observation is not None else None
+        if scene is None:
+            return False
+        if not self._scene_is_trustworthy(observation):
+            return False
+        if scene.flags.safe_to_retreat is not True:
+            return False
+        clearance = scene.obstacles.rear_clearance_m
+        if clearance is None:
+            return False
+        return clearance >= self._settings.vision.minimum_backward_clearance_m
+
+    def _rotation_is_safe(self, observation: CaptureObservation | None) -> bool:
+        scene = observation.scene_understanding if observation is not None else None
+        if scene is None:
+            return False
+        if scene.confidence < self._settings.vision.maximum_rotation_risk_confidence:
+            return False
+        return scene.flags.safe_to_rotate is not False
+
+    def _motion_is_safe(self, action: ActionCall, observation: CaptureObservation | None) -> bool:
+        if not self._scene_understanding_available(observation):
+            return True
+        if action.name == "move_forward":
+            return self._forward_motion_is_safe(observation)
+        if action.name == "move_backward":
+            return self._backward_motion_is_safe(observation)
+        if action.name in {"turn_left", "turn_right"}:
+            return self._rotation_is_safe(observation)
+        return True
+
+    def _scene_recommended_scan_action(self, observation: CaptureObservation | None) -> ActionCall | None:
+        scene = observation.scene_understanding if observation is not None else None
+        if scene is None:
+            return None
+        action_name = scene.recommended_action
+        profile_name = scene.recommended_profile_name
+        if action_name in {"turn_left", "turn_right"} and profile_name in self._settings.executor.manual_profiles:
+            return ActionCall(action_name, (profile_name,))
+        return None
+
     def _fallback_profile(self, current_subgoal: TaskSubgoal) -> str:
         if current_subgoal.action or current_subgoal.action_expression:
             return "motion_sequence"
@@ -427,6 +521,7 @@ class ReactiveScenePlanner:
         status: RobotStatus,
         points: list[PointOfInterest],
         latest_execution: dict[str, object],
+        observation: CaptureObservation | None = None,
     ) -> PlannerDecision:
         latest_action = self._latest_execution_action(latest_execution)
         if profile_name == "navigation_sequence" and current_subgoal.point is not None:
@@ -484,6 +579,24 @@ class ReactiveScenePlanner:
                     subgoal_state="completed",
                     stop=False,
                     raw={"profile_name": profile_name, "source": "fallback"},
+                )
+            if not self._motion_is_safe(explicit_action, observation):
+                scan_action = self._scene_recommended_scan_action(observation)
+                if scan_action is not None and scan_action.name != explicit_action.name:
+                    return self._decision_from_action_call(
+                        scan_action,
+                        response="I will rotate first to improve visibility before continuing the motion.",
+                        reason="structured scene understanding marked the requested motion as unsafe",
+                        confidence=max(self._settings.planner.confidence_floor, 0.7),
+                        observation_focus="scene",
+                        target_hint="",
+                        subgoal_state="continue",
+                        stop=False,
+                        raw={"profile_name": profile_name, "source": "vision_guardrail"},
+                    )
+                return self._safe_finish(
+                    "structured scene understanding blocked the requested motion",
+                    profile_name=profile_name,
                 )
             return self._decision_from_action_call(
                 explicit_action,
@@ -645,6 +758,24 @@ class ReactiveScenePlanner:
             return False
         return left.name == right.name and left.arguments == right.arguments
 
+    def _is_safe_motion_variant(self, *, actual: ActionCall, expected: ActionCall) -> bool:
+        if actual.name != expected.name:
+            return False
+        if not expected.arguments:
+            return not actual.arguments
+        if not actual.arguments or str(actual.arguments[0]).strip() != str(expected.arguments[0]).strip():
+            return False
+        if len(expected.arguments) == 1:
+            return len(actual.arguments) == 1
+        if len(actual.arguments) != 2:
+            return False
+        try:
+            actual_scalar = float(actual.arguments[1])
+            expected_scalar = float(expected.arguments[1])
+        except (TypeError, ValueError):
+            return False
+        return 0.0 < actual_scalar <= expected_scalar
+
     def _scene_completion_supported(
         self,
         *,
@@ -744,6 +875,58 @@ class ReactiveScenePlanner:
             if not explicit_stop_already_satisfied:
                 raise PlannerError("motion_sequence_finished_before_any_confirmed_action")
         if profile_name == "motion_sequence":
+            if (
+                action.name in {"move_forward", "move_backward", "turn_left", "turn_right"}
+                and self._scene_understanding_required(profile_name)
+                and not self._scene_understanding_available(observation)
+            ):
+                self._logger.warning(
+                    "planner guardrail override: motion_sequence blocked motion without structured scene understanding"
+                )
+                return self._safe_finish(
+                    "motion sequence blocked without structured scene understanding",
+                    profile_name=profile_name,
+                )
+            if action.name in {"move_forward", "move_backward", "turn_left", "turn_right"} and not self._has_visual_observation(
+                observation
+            ):
+                self._logger.warning(
+                    "planner guardrail override: motion_sequence blocked motion without fresh visual evidence"
+                )
+                return self._safe_finish(
+                    "motion sequence blocked without fresh visual evidence",
+                    profile_name=profile_name,
+                )
+            if action.name in {"move_forward", "move_backward", "turn_left", "turn_right"} and not self._motion_is_safe(
+                action,
+                observation,
+            ):
+                scan_action = self._scene_recommended_scan_action(observation)
+                if scan_action is not None and scan_action.name != action.name:
+                    self._logger.warning(
+                        "planner guardrail override: motion_sequence replaced unsafe action=%s with scan=%s based on structured scene understanding",
+                        action.name,
+                        scan_action.name,
+                    )
+                    return self._decision_from_action_call(
+                        scan_action,
+                        response="I will rotate first to improve visibility before continuing the requested motion.",
+                        reason="structured scene understanding marked the requested motion as unsafe",
+                        confidence=max(self._settings.planner.confidence_floor, 0.7),
+                        observation_focus="scene",
+                        target_hint="",
+                        subgoal_state="continue",
+                        stop=False,
+                        raw={"profile_name": profile_name, "source": "vision_guardrail"},
+                    )
+                self._logger.warning(
+                    "planner guardrail override: motion_sequence blocked unsafe action=%s from structured scene understanding",
+                    action.name,
+                )
+                return self._safe_finish(
+                    "motion sequence blocked by structured scene understanding",
+                    profile_name=profile_name,
+                )
             expected_action = self._subgoal_action(current_subgoal)
             if expected_action is not None:
                 if expected_action.name == "stop":
@@ -768,11 +951,14 @@ class ReactiveScenePlanner:
                     return self._fallback_decision(
                         profile_name=profile_name,
                         current_subgoal=current_subgoal,
-                        status=status,
-                        points=points,
-                        latest_execution=latest_execution,
-                    )
-                elif action.name == expected_action.name and not self._actions_match(action, expected_action):
+                            status=status,
+                            points=points,
+                            latest_execution=latest_execution,
+                        )
+                elif action.name == expected_action.name and not self._is_safe_motion_variant(
+                    actual=action,
+                    expected=expected_action,
+                ):
                     self._logger.warning(
                         "planner guardrail override: explicit motion action arguments changed from router hint expected=%s actual=%s",
                         current_subgoal.action_expression,
@@ -786,6 +972,18 @@ class ReactiveScenePlanner:
                         latest_execution=latest_execution,
                     )
         if profile_name == "scene_exploration":
+            if (
+                action.name in {"move_forward", "move_backward", "turn_left", "turn_right"}
+                and self._scene_understanding_required(profile_name)
+                and not self._scene_understanding_available(observation)
+            ):
+                self._logger.warning(
+                    "planner guardrail override: scene_exploration blocked action without structured scene understanding"
+                )
+                return self._safe_finish(
+                    "scene exploration blocked without structured scene understanding",
+                    profile_name=profile_name,
+                )
             if action.name == "finish_task" and not self._scene_completion_supported(
                 current_subgoal=current_subgoal,
                 status=status,
@@ -807,6 +1005,14 @@ class ReactiveScenePlanner:
                     return self._safe_finish(
                         "scene exploration forward motion blocked without fresh visual evidence",
                         profile_name=profile_name,
+                    )
+                if self._scene_understanding_available(observation) and not self._forward_motion_is_safe(observation):
+                    self._logger.warning(
+                        "planner guardrail override: scene_exploration downgraded unsafe forward motion using structured scene understanding"
+                    )
+                    return self._build_conservative_scan_decision(
+                        profile_name=profile_name,
+                        reason="scene exploration forward motion blocked by structured scene understanding",
                     )
                 minimum_forward_confidence = max(self._settings.planner.confidence_floor, 0.6)
                 if decision.confidence < minimum_forward_confidence:

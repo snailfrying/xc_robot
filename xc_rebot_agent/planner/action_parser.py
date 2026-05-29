@@ -21,6 +21,8 @@ ACTION_LIBRARY_TEXT = (
     "Allowed action names are move_forward, move_backward, turn_left, turn_right, navigate, stop, and finish_task. "
     "For move_forward/move_backward/turn_left/turn_right, args must contain profile_name using a configured manual profile "
     "such as explore_forward, explore_backward, explore_left, or explore_right. "
+    "For move_forward/move_backward, args may also contain distance_m when the user gives an explicit distance. "
+    "For turn_left/turn_right, args may also contain angle_deg when the user gives an explicit turn angle. "
     "For navigate, args must contain point_id from /points. "
     "For stop, args may contain reason_key. "
     "For finish_task, args should be an empty object."
@@ -35,7 +37,13 @@ class ActionCall:
 
 def action_call_to_payload(action: ActionCall) -> dict[str, object]:
     if action.name in {"move_forward", "move_backward", "turn_left", "turn_right"}:
-        return {"name": action.name, "args": {"profile_name": str(action.arguments[0])}}
+        args: dict[str, object] = {"profile_name": str(action.arguments[0])}
+        if len(action.arguments) >= 2:
+            if action.name in {"move_forward", "move_backward"}:
+                args["distance_m"] = float(action.arguments[1])
+            else:
+                args["angle_deg"] = float(action.arguments[1])
+        return {"name": action.name, "args": args}
     if action.name == "navigate":
         return {"name": action.name, "args": {"point_id": str(action.arguments[0])}}
     if action.name == "stop":
@@ -72,8 +80,12 @@ def validate_action_call(action: ActionCall) -> None:
     if action.name not in SUPPORTED_ACTION_NAMES:
         raise PlannerError(f"unsupported_action:{action.name}")
     if action.name in {"move_forward", "move_backward", "turn_left", "turn_right"}:
-        if len(action.arguments) != 1 or not isinstance(action.arguments[0], str) or not action.arguments[0].strip():
+        if len(action.arguments) not in {1, 2} or not isinstance(action.arguments[0], str) or not action.arguments[0].strip():
             raise PlannerError(f"invalid_motion_action_arguments:{action.name}")
+        if len(action.arguments) == 2:
+            scalar = action.arguments[1]
+            if not isinstance(scalar, int | float) or float(scalar) <= 0.0:
+                raise PlannerError(f"invalid_motion_action_scalar:{action.name}")
         return
     if action.name == "navigate":
         if len(action.arguments) != 1 or not isinstance(action.arguments[0], str) or not action.arguments[0].strip():
@@ -106,7 +118,11 @@ def _parse_action_args(name: str, args: object) -> tuple[object, ...]:
         if not isinstance(args, dict):
             raise PlannerError(f"invalid_motion_action_arguments:{name}")
         profile_name = str(args.get("profile_name", "") or "").strip()
-        return (profile_name,)
+        if name in {"move_forward", "move_backward"}:
+            distance_m = args.get("distance_m", None)
+            return (profile_name, float(distance_m)) if distance_m not in (None, "") else (profile_name,)
+        angle_deg = args.get("angle_deg", None)
+        return (profile_name, float(angle_deg)) if angle_deg not in (None, "") else (profile_name,)
     if name == "navigate":
         if not isinstance(args, dict):
             raise PlannerError("invalid_navigate_action_arguments")

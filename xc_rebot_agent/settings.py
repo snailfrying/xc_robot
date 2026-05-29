@@ -40,6 +40,22 @@ class LlmSettings:
 
 
 @dataclass(frozen=True)
+class VisionSettings:
+    enabled: bool
+    api_url: str
+    api_key: str
+    backend: str
+    request_timeout_sec: float
+    fail_closed: bool
+    require_depth: bool
+    prefer_structured_scene: bool
+    minimum_confidence: float
+    minimum_forward_clearance_m: float
+    minimum_backward_clearance_m: float
+    maximum_rotation_risk_confidence: float
+
+
+@dataclass(frozen=True)
 class ManualProfile:
     name: str
     endpoint: str
@@ -47,6 +63,11 @@ class ManualProfile:
     pulse_sec: float
     settle_sec: float
     status_expect_state: str
+    linear_m_per_sec: float
+    angular_rad_per_sec: float
+    min_pulse_sec: float
+    max_pulse_sec: float
+    keepalive_interval_sec: float
 
 
 @dataclass(frozen=True)
@@ -69,6 +90,7 @@ class PlannerSettings:
     confidence_floor: float
     allow_llm_point_resolution: bool
     allow_vlm_exploration: bool
+    allow_vlm_motion: bool
     force_stop_on_low_confidence: bool
 
 
@@ -105,6 +127,7 @@ class AppSettings:
     session_prefix: str
     robot_api: RobotApiSettings
     llm: LlmSettings
+    vision: VisionSettings
     executor: ExecutorSettings
     planner: PlannerSettings
     point_resolution: PointResolutionSettings
@@ -120,6 +143,7 @@ def load_settings(*, project_root: Path, config_path: Path, env_path: Path) -> A
     robot_api_raw = raw["robot_api"]
     capture_raw = robot_api_raw["capture"]
     llm_raw = raw["llm"]
+    vision_raw = raw["vision"]
     planner_raw = raw["planner"]
     point_raw = raw["point_resolution"]
     routing_raw = raw["routing"]
@@ -165,6 +189,30 @@ def load_settings(*, project_root: Path, config_path: Path, env_path: Path) -> A
         max_retries=int(llm_raw["max_retries"]),
     )
 
+    vision = VisionSettings(
+        enabled=bool(vision_raw["enabled"]),
+        api_url=_env_first(
+            APP_ENV_OVERRIDES["vision_api_url"],
+            default=str(vision_raw["api_url"]).strip(),
+        ),
+        api_key=_env_first(
+            APP_ENV_OVERRIDES["vision_api_key"],
+            default=str(vision_raw.get("api_key", "")).strip(),
+        ),
+        backend=_env_first(
+            APP_ENV_OVERRIDES["vision_backend"],
+            default=str(vision_raw["backend"]).strip(),
+        ),
+        request_timeout_sec=float(vision_raw["request_timeout_sec"]),
+        fail_closed=bool(vision_raw["fail_closed"]),
+        require_depth=bool(vision_raw["require_depth"]),
+        prefer_structured_scene=bool(vision_raw["prefer_structured_scene"]),
+        minimum_confidence=float(vision_raw["minimum_confidence"]),
+        minimum_forward_clearance_m=float(vision_raw["minimum_forward_clearance_m"]),
+        minimum_backward_clearance_m=float(vision_raw["minimum_backward_clearance_m"]),
+        maximum_rotation_risk_confidence=float(vision_raw["maximum_rotation_risk_confidence"]),
+    )
+
     manual_profiles_raw = raw["executor"]["manual_profiles"]
     manual_profiles: dict[str, ManualProfile] = {}
     for name, payload in manual_profiles_raw.items():
@@ -175,6 +223,11 @@ def load_settings(*, project_root: Path, config_path: Path, env_path: Path) -> A
             pulse_sec=float(payload["pulse_sec"]),
             settle_sec=float(payload["settle_sec"]),
             status_expect_state=str(payload["status_expect_state"]).strip(),
+            linear_m_per_sec=float(payload.get("linear_m_per_sec", 0.0) or 0.0),
+            angular_rad_per_sec=float(payload.get("angular_rad_per_sec", 0.0) or 0.0),
+            min_pulse_sec=float(payload.get("min_pulse_sec", 0.1) or 0.1),
+            max_pulse_sec=float(payload.get("max_pulse_sec", payload["pulse_sec"]) or payload["pulse_sec"]),
+            keepalive_interval_sec=float(payload.get("keepalive_interval_sec", 0.3) or 0.3),
         )
 
     executor = ExecutorSettings(
@@ -192,6 +245,7 @@ def load_settings(*, project_root: Path, config_path: Path, env_path: Path) -> A
         confidence_floor=float(planner_raw["confidence_floor"]),
         allow_llm_point_resolution=bool(planner_raw["allow_llm_point_resolution"]),
         allow_vlm_exploration=bool(planner_raw["allow_vlm_exploration"]),
+        allow_vlm_motion=bool(planner_raw.get("allow_vlm_motion", True)),
         force_stop_on_low_confidence=bool(planner_raw["force_stop_on_low_confidence"]),
     )
 
@@ -224,6 +278,7 @@ def load_settings(*, project_root: Path, config_path: Path, env_path: Path) -> A
         session_prefix=str(raw["project"]["session_prefix"]).strip(),
         robot_api=robot_api,
         llm=llm,
+        vision=vision,
         executor=executor,
         planner=planner,
         point_resolution=point_resolution,

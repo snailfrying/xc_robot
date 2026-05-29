@@ -39,5 +39,9 @@ class ObservationError(XcRebotError):
     """Raised when camera capture or image materialization fails."""
 
 
+class VisionServiceError(XcRebotError):
+    """Raised when structured scene understanding cannot be produced reliably."""
+
+
 class ActionExecutionError(XcRebotError):
     """Raised when a synchronous action cannot be completed safely."""

@@ -12,7 +12,7 @@ navigation_terminal_grace_sec = 2.0
 
 [robot_api.capture]
 enabled = true
-include_depth = false
+include_depth = true
 return_mode = "url"
 request_timeout_sec = 15.0
 prefer_inline_if_available = true
@@ -26,12 +26,27 @@ request_timeout_sec = 90.0
 temperature = 0.0
 max_retries = 1
 
+[vision]
+enabled = false
+api_url = ""
+api_key = ""
+backend = "yolo_depth_llm"
+request_timeout_sec = 20.0
+fail_closed = true
+require_depth = true
+prefer_structured_scene = true
+minimum_confidence = 0.55
+minimum_forward_clearance_m = 0.75
+minimum_backward_clearance_m = 0.45
+maximum_rotation_risk_confidence = 0.35
+
 [planner]
 max_steps = 12
-history_window = 6
+history_window = 3
 confidence_floor = 0.25
 allow_llm_point_resolution = true
 allow_vlm_exploration = true
+allow_vlm_motion = true
 force_stop_on_low_confidence = true
 
 [point_resolution]
@@ -52,31 +67,47 @@ poll_interval_sec = 0.5
 
 [executor.manual_profiles.explore_forward]
 endpoint = "forward"
-speed_level = "slow"
+speed_level = "normal"
 pulse_sec = 1.0
 settle_sec = 0.8
 status_expect_state = "manual"
+linear_m_per_sec = 0.20
+min_pulse_sec = 0.15
+max_pulse_sec = 6.0
+keepalive_interval_sec = 0.3
 
 [executor.manual_profiles.explore_backward]
 endpoint = "backward"
-speed_level = "slow"
+speed_level = "normal"
 pulse_sec = 0.8
 settle_sec = 0.8
 status_expect_state = "manual"
+linear_m_per_sec = 0.20
+min_pulse_sec = 0.15
+max_pulse_sec = 5.0
+keepalive_interval_sec = 0.3
 
 [executor.manual_profiles.explore_left]
 endpoint = "left"
-speed_level = "slow"
+speed_level = "normal"
 pulse_sec = 0.7
 settle_sec = 0.8
 status_expect_state = "manual"
+angular_rad_per_sec = 0.50
+min_pulse_sec = 0.15
+max_pulse_sec = 4.0
+keepalive_interval_sec = 0.3
 
 [executor.manual_profiles.explore_right]
 endpoint = "right"
-speed_level = "slow"
+speed_level = "normal"
 pulse_sec = 0.7
 settle_sec = 0.8
 status_expect_state = "manual"
+angular_rad_per_sec = 0.50
+min_pulse_sec = 0.15
+max_pulse_sec = 4.0
+keepalive_interval_sec = 0.3
 
 [logging]
 directory = "runtime_logs"

@@ -7,6 +7,8 @@ from pathlib import Path
 from .logging_utils import get_component_logger
 from .session_memory import SessionMemoryStore
 
+MODEL_SESSION_CONTEXT_LIMIT = 3
+
 
 class InteractiveGoalCli:
     def __init__(self, *, settings, logger):
@@ -54,7 +56,7 @@ class InteractiveGoalCli:
             session_context = []
             fed_to_agent = current_mode == "stateful"
             if fed_to_agent:
-                session_context = store.recent_context(limit=self._settings.planner.history_window)
+                session_context = store.recent_context(limit=MODEL_SESSION_CONTEXT_LIMIT)
             self._logger.info(
                 "interactive goal submit: shell_session_id=%s mode=%s fed_to_agent=%s goal=%s context_items=%s",
                 shell_session_id,

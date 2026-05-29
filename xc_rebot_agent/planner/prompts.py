@@ -35,6 +35,7 @@ def build_common_prompt_contract() -> str:
 - The newest robot status and the newest execution result are the source of truth for this turn.
 - subgoal_runtime_context is the normalized machine-readable summary of current subgoal state; use it together with robot_status and latest_execution_result.
 - If an observation image is provided, use it as the newest visual evidence for this turn.
+- If structured scene understanding is provided in fresh_runtime_evidence or observation_metadata, use it as the primary machine-readable safety evidence before interpreting raw images.
 - Recent history and session memory are compact memory only. They must not override the newest status, newest execution result, or newest image.
 - The runtime executes one action synchronously and waits for completion before the next turn.
 </freshness>
@@ -108,11 +109,14 @@ Your job is to convert the current explicit chassis subgoal into one safe atomic
 <motion_policy>
 - Prefer move_forward(profile_name), move_backward(profile_name), turn_left(profile_name), or turn_right(profile_name).
 - Use the configured profile names exactly as provided in the action library.
-- If current_subgoal_summary.router_action_hint already contains an explicit deterministic chassis action or stop action, prefer that exact structured action over inventing a different motion.
+- If current_subgoal_summary.router_action_hint already contains an explicit deterministic chassis action or stop action, treat it as the preferred direction and intent, but reduce the step conservatively whenever the newest visual evidence is weak or the original scalar is too large for one safe blind pulse.
+- Prefer structured scene_understanding flags such as safe_to_advance, safe_to_retreat, safe_to_rotate, forward_clearance_m, and risk_reasons over subjective image guessing when they are available.
+- If the router_action_hint contains distance_m or angle_deg, do not increase that scalar. You may keep it or reduce it conservatively for safety.
 - action_space.allowed_actions_for_profile is the precise action subset for this profile on this turn; stay inside it.
 - Allowed actions on this profile are only move_*/turn_* semantic chassis actions, stop(reason_key), or finish_task().
-- Use the newest observation image, when present, to avoid obviously unsafe motion.
-- Do not invent centimeters or raw durations in the action. The runtime profiles already contain calibrated timing.
+- Use the newest observation image as required safety evidence before non-stop motion. If there is no fresh visual evidence, return stop(reason_key).
+- Keep each motion atomic and conservative so the system can observe again before continuing. Favor short forward pulses and small turns over large one-shot motions.
+- Do not invent raw durations in the action. The runtime profiles already contain calibrated timing.
 </motion_policy>
 """.strip()
 
@@ -137,7 +141,13 @@ Your job is to observe, decide one safe next action, execute, then rely on the n
 - Use known_points and matched_point_hint on every turn. If the newest evidence plus map information already justify a known destination, switch to navigate(point_id) instead of continuing blind exploration.
 - current_subgoal_summary.planner_profile_hint and current_subgoal_summary.route are deterministic upstream hints. Respect them as intent constraints even while exploring.
 - Use fresh_runtime_evidence as the first-pass evidence layer, then consult robot_status and observation_metadata only when needed.
-- Use move_forward(profile_name) only when the forward path looks open enough from the newest visual evidence and your confidence is clearly above the safety floor.
+- When structured scene_understanding is available, use its obstacle clearance, target visibility, and safety flags first; use raw images only as supporting evidence.
+- For search tasks such as finding a door, person, or object, prioritize scan turns first to establish direction before committing to forward motion.
+- When the scene appears open enough and the newest evidence supports safe advance, prefer a meaningful conservative move_forward step before tiny micro-adjustments. Use larger safe motion first, then refine with short turns or shorter advances.
+- If the target is already visible or partially localized, switch from broad exploration to small heading correction and short approach steps.
+- If the target can be answered from perception alone, such as telling where the door is, you may finish after clearly describing the latest observed direction instead of physically reaching it.
+- Use move_forward(profile_name, optional distance_m) only when the forward path looks open enough from the newest visual evidence and your confidence is clearly above the safety floor.
+- When the scene is broadly open and confidence is high, you may choose a bounded forward distance such as 0.4m to 0.8m if allowed by safety evidence; if confidence is weaker, prefer a turn or a shorter step.
 - Use move_backward(profile_name) to recover space or reduce uncertainty.
 - Use turn_left(profile_name) or turn_right(profile_name) to improve visibility or heading alignment before attempting uncertain forward motion.
 - Keep each turn atomic. Never assume a later step before the newest synchronous result is available.

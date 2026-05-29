@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import time
 from datetime import datetime
+from math import radians
 
 from ..constants import TERMINAL_NAV_STATES
 from ..errors import ActionExecutionError
+from ..models import CaptureObservation
 from ..models import ExecutionResult
 from ..planner.action_parser import action_call_to_payload
 from ..planner.action_parser import format_action_call
@@ -17,7 +19,14 @@ class SynchronousActionExecutor:
         self._robot_client = robot_client
         self._logger = logger
 
-    def execute(self, action_payload: object, *, session_id: str = "", step_index: int = 0):
+    def execute(
+        self,
+        action_payload: object,
+        *,
+        session_id: str = "",
+        step_index: int = 0,
+        observation: CaptureObservation | None = None,
+    ):
         action = parse_action_payload(action_payload)
         action_expression = format_action_call(action)
         started_at = datetime.now().astimezone()
@@ -40,6 +49,7 @@ class SynchronousActionExecutor:
         self._assert_action_allowed(
             action,
             status_before=status_before,
+            observation=observation,
             session_id=session_id,
             step_index=step_index,
         )
@@ -100,7 +110,15 @@ class SynchronousActionExecutor:
             finished_at=finished_at,
         )
 
-    def _assert_action_allowed(self, action, *, status_before, session_id: str, step_index: int) -> None:
+    def _assert_action_allowed(
+        self,
+        action,
+        *,
+        status_before,
+        observation: CaptureObservation | None,
+        session_id: str,
+        step_index: int,
+    ) -> None:
         if action.name == "finish_task":
             return
         if action.name == "stop":
@@ -126,6 +144,7 @@ class SynchronousActionExecutor:
                 )
             if status_before.robot_state == "manual":
                 raise ActionExecutionError(f"action_blocked_robot_manual_active:{action.name}")
+            self._assert_structured_scene_safe(action, observation=observation)
             self._logger.info(
                 "executor local safety check ok: session_id=%s step=%s action=%s",
                 session_id,
@@ -134,20 +153,55 @@ class SynchronousActionExecutor:
             )
             return
 
+    def _assert_structured_scene_safe(self, action, *, observation: CaptureObservation | None) -> None:
+        if not (self._settings.vision.enabled and self._settings.vision.prefer_structured_scene):
+            return
+        scene = observation.scene_understanding if observation is not None else None
+        if scene is None:
+            raise ActionExecutionError(f"action_blocked_no_structured_scene:{action.name}")
+        if scene.confidence < self._settings.vision.minimum_confidence:
+            raise ActionExecutionError(f"action_blocked_low_scene_confidence:{action.name}:{scene.confidence:.3f}")
+        if scene.flags.depth_reliable is False:
+            raise ActionExecutionError(f"action_blocked_depth_unreliable:{action.name}")
+        if action.name == "move_forward":
+            clearance = scene.obstacles.forward_clearance_m
+            if scene.flags.safe_to_advance is not True or clearance is None:
+                raise ActionExecutionError("action_blocked_forward_scene_unknown")
+            if clearance < self._settings.vision.minimum_forward_clearance_m:
+                raise ActionExecutionError(
+                    f"action_blocked_forward_clearance:{clearance:.3f}:min={self._settings.vision.minimum_forward_clearance_m:.3f}"
+                )
+            return
+        if action.name == "move_backward":
+            clearance = scene.obstacles.rear_clearance_m
+            if scene.flags.safe_to_retreat is not True or clearance is None:
+                raise ActionExecutionError("action_blocked_backward_scene_unknown")
+            if clearance < self._settings.vision.minimum_backward_clearance_m:
+                raise ActionExecutionError(
+                    f"action_blocked_backward_clearance:{clearance:.3f}:min={self._settings.vision.minimum_backward_clearance_m:.3f}"
+                )
+            return
+        if action.name in {"turn_left", "turn_right"} and scene.flags.safe_to_rotate is False:
+            raise ActionExecutionError(f"action_blocked_rotation_unsafe:{action.name}")
+
     def _execute_manual_action(self, action, *, session_id: str, step_index: int, events: list[dict[str, object]]):
         profile_name = str(action.arguments[0]).strip()
         profile = self._settings.executor.manual_profiles[profile_name]
+        pulse_sec = self._manual_pulse_sec(action, profile)
         self._logger.info(
-            "manual action start: session_id=%s step=%s action=%s profile=%s endpoint=%s pulse=%.2fs settle=%.2fs",
+            "manual action start: session_id=%s step=%s action=%s profile=%s endpoint=%s speed_level=%s pulse=%.2fs keepalive=%.2fs settle=%.2fs args=%s",
             session_id,
             step_index,
             action.name,
             profile_name,
             profile.endpoint,
-            profile.pulse_sec,
+            profile.speed_level,
+            pulse_sec,
+            profile.keepalive_interval_sec,
             profile.settle_sec,
+            action.arguments,
         )
-        move_ack = self._robot_client.move(profile.endpoint, speed_level=profile.speed_level)
+        move_ack = self._send_manual_move(profile)
         events.append(
             {
                 "stage": "manual_command_sent",
@@ -155,6 +209,8 @@ class SynchronousActionExecutor:
                 "step_index": step_index,
                 "endpoint": profile.endpoint,
                 "speed_level": profile.speed_level,
+                "speed_mps": self._profile_speed_mps(profile),
+                "angular_radps": self._profile_angular_radps(profile),
                 "api_ack": move_ack.to_trace(),
             }
         )
@@ -168,13 +224,23 @@ class SynchronousActionExecutor:
             events=events,
         )
         self._logger.info("manual transition confirmed: %s", transition_status.short_dict())
-        time.sleep(profile.pulse_sec)
+        keepalive_count = self._run_manual_keepalive(
+            profile,
+            pulse_sec=pulse_sec,
+            session_id=session_id,
+            step_index=step_index,
+            events=events,
+        )
         events.append(
             {
                 "stage": "manual_pulse_elapsed",
                 "session_id": session_id,
                 "step_index": step_index,
-                "pulse_sec": profile.pulse_sec,
+                "pulse_sec": pulse_sec,
+                "keepalive_count": keepalive_count,
+                "keepalive_interval_sec": profile.keepalive_interval_sec,
+                "requested_distance_m": self._requested_distance_m(action),
+                "requested_angle_deg": self._requested_angle_deg(action),
             }
         )
         stop_ack = self._robot_client.stop(reason=self._settings.executor.stop.reason)
@@ -206,7 +272,100 @@ class SynchronousActionExecutor:
             step_index=step_index,
             events=events,
         )
-        return final_status, f"manual action {action.name} completed synchronously"
+        return final_status, f"manual action {action.name} completed synchronously pulse={pulse_sec:.3f}s"
+
+    def _send_manual_move(self, profile):
+        return self._robot_client.move(
+            profile.endpoint,
+            speed_level=profile.speed_level,
+            speed_mps=self._profile_speed_mps(profile),
+            angular_radps=self._profile_angular_radps(profile),
+        )
+
+    def _run_manual_keepalive(
+        self,
+        profile,
+        *,
+        pulse_sec: float,
+        session_id: str,
+        step_index: int,
+        events: list[dict[str, object]],
+    ) -> int:
+        interval = float(profile.keepalive_interval_sec)
+        if interval <= 0.0 or interval >= 2.0:
+            raise ActionExecutionError(f"invalid_manual_keepalive_interval:{profile.name}:{interval}")
+        deadline = time.monotonic() + pulse_sec
+        keepalive_count = 0
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0.0:
+                return keepalive_count
+            time.sleep(min(interval, remaining))
+            if time.monotonic() >= deadline:
+                return keepalive_count
+            keepalive_ack = self._send_manual_move(profile)
+            keepalive_count += 1
+            events.append(
+                {
+                    "stage": "manual_keepalive_sent",
+                    "session_id": session_id,
+                    "step_index": step_index,
+                    "endpoint": profile.endpoint,
+                    "speed_level": profile.speed_level,
+                    "speed_mps": self._profile_speed_mps(profile),
+                    "angular_radps": self._profile_angular_radps(profile),
+                    "keepalive_count": keepalive_count,
+                    "api_ack": keepalive_ack.to_trace(),
+                }
+            )
+
+    def _profile_speed_mps(self, profile) -> float | None:
+        if profile.endpoint not in {"forward", "backward"}:
+            return None
+        speed = float(getattr(profile, "linear_m_per_sec", 0.0) or 0.0)
+        return speed if speed > 0.0 else None
+
+    def _profile_angular_radps(self, profile) -> float | None:
+        if profile.endpoint not in {"left", "right"}:
+            return None
+        speed = float(getattr(profile, "angular_rad_per_sec", 0.0) or 0.0)
+        return speed if speed > 0.0 else None
+
+    def _manual_pulse_sec(self, action, profile) -> float:
+        if len(action.arguments) < 2:
+            return float(profile.pulse_sec)
+        scalar = float(action.arguments[1])
+        if action.name in {"move_forward", "move_backward"}:
+            rate = float(getattr(profile, "linear_m_per_sec", 0.0) or 0.0)
+            if rate <= 0.0:
+                raise ActionExecutionError(f"manual_profile_missing_linear_calibration:{profile.name}")
+            pulse_sec = scalar / rate
+        else:
+            rate = float(getattr(profile, "angular_rad_per_sec", 0.0) or 0.0)
+            if rate <= 0.0:
+                raise ActionExecutionError(f"manual_profile_missing_angular_calibration:{profile.name}")
+            pulse_sec = radians(scalar) / rate
+        min_pulse_sec = float(getattr(profile, "min_pulse_sec", 0.0) or 0.0)
+        max_pulse_sec = float(getattr(profile, "max_pulse_sec", profile.pulse_sec) or profile.pulse_sec)
+        if pulse_sec < min_pulse_sec:
+            raise ActionExecutionError(
+                f"manual_motion_below_min_pulse:{action.name}:requested={scalar}:pulse={pulse_sec:.3f}:min={min_pulse_sec:.3f}"
+            )
+        if pulse_sec > max_pulse_sec:
+            raise ActionExecutionError(
+                f"manual_motion_exceeds_max_pulse:{action.name}:requested={scalar}:pulse={pulse_sec:.3f}:max={max_pulse_sec:.3f}"
+            )
+        return pulse_sec
+
+    def _requested_distance_m(self, action) -> float | None:
+        if action.name not in {"move_forward", "move_backward"} or len(action.arguments) < 2:
+            return None
+        return float(action.arguments[1])
+
+    def _requested_angle_deg(self, action) -> float | None:
+        if action.name not in {"turn_left", "turn_right"} or len(action.arguments) < 2:
+            return None
+        return float(action.arguments[1])
 
     def _execute_navigation(self, action, *, session_id: str, step_index: int, events: list[dict[str, object]]):
         point_id = str(action.arguments[0]).strip()

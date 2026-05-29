@@ -5,6 +5,9 @@ APP_ENV_OVERRIDES = {
     "llm_api_url": "XC_LLM_API_URL",
     "llm_api_key": "XC_LLM_API_KEY",
     "llm_model_name": "XC_LLM_MODEL_NAME",
+    "vision_api_url": "XC_VISION_API_URL",
+    "vision_api_key": "XC_VISION_API_KEY",
+    "vision_backend": "XC_VISION_BACKEND",
 }
 
 PPIO_ENV_FALLBACKS = {

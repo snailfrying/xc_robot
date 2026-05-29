@@ -44,11 +44,23 @@ class RobotApiClient:
             raise RobotProtocolError("points payload is not a list")
         return [PointOfInterest.from_api(item) for item in points if isinstance(item, dict)]
 
-    def move(self, endpoint: str, *, speed_level: str) -> RobotApiEnvelope:
+    def move(
+        self,
+        endpoint: str,
+        *,
+        speed_level: str,
+        speed_mps: float | None = None,
+        angular_radps: float | None = None,
+    ) -> RobotApiEnvelope:
+        payload: dict[str, object] = {"speed_level": speed_level}
+        if speed_mps is not None:
+            payload["speed_mps"] = speed_mps
+        if angular_radps is not None:
+            payload["angular_radps"] = angular_radps
         envelope = self._request_json(
             "POST",
             f"/move/{endpoint}",
-            payload={"speed_level": speed_level},
+            payload=payload,
             expected_msgs=MOVE_ACK_MSGS.get(endpoint, set()),
         )
         self._validate_move_envelope(envelope, endpoint=endpoint)
@@ -86,10 +98,11 @@ class RobotApiClient:
             image_id=str(data.get("image_id", "") or "").strip(),
             created_at=str(data.get("created_at", "") or "").strip(),
             return_mode=str(data.get("return_mode", "") or "").strip(),
-            rgb=CaptureAsset.from_api(data.get("rgb")),
-            depth=CaptureAsset.from_api(data.get("depth")),
+            rgb=CaptureAsset.from_api(data.get("rgb"), default_content_type="image/jpeg"),
+            depth=CaptureAsset.from_api(data.get("depth"), default_content_type="image/png"),
             rgb_data_url="",
             depth_data_url="",
+            scene_understanding=None,
             raw=data,
         )
 
@@ -279,4 +292,10 @@ class RobotApiClient:
     def _resolve_url(self, path_or_url: str) -> str:
         if path_or_url.startswith("http://") or path_or_url.startswith("https://"):
             return path_or_url
+        if path_or_url.startswith("/"):
+            parsed_base = urllib_parse.urlparse(self._base_url)
+            base_path = parsed_base.path.rstrip("/")
+            if base_path and (path_or_url == base_path or path_or_url.startswith(f"{base_path}/")):
+                origin = f"{parsed_base.scheme}://{parsed_base.netloc}"
+                return urllib_parse.urljoin(f"{origin}/", path_or_url.lstrip("/"))
         return urllib_parse.urljoin(f"{self._base_url}/", path_or_url.lstrip("/"))

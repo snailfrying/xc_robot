@@ -1,31 +1,63 @@
 from __future__ import annotations
 
 from ..errors import ObservationError
+from ..errors import VisionServiceError
 from ..models import CaptureObservation
 from ..utils.text_utils import image_bytes_to_data_url
 
 
 class ObservationProvider:
-    def __init__(self, *, settings, robot_client, logger):
+    def __init__(self, *, settings, robot_client, vision_client, logger):
         self._settings = settings
         self._robot_client = robot_client
+        self._vision_client = vision_client
         self._logger = logger
 
     def capture_scene(self) -> CaptureObservation:
         if not self._settings.robot_api.capture.enabled:
             raise ObservationError("capture disabled by configuration")
+        structured_scene_required = bool(
+            self._settings.vision.enabled and self._settings.vision.prefer_structured_scene
+        )
+        if structured_scene_required and not self._settings.robot_api.capture.include_depth:
+            raise ObservationError("structured_scene_requires_capture_depth_enabled")
         self._logger.info("capture start: include_depth=%s return_mode=%s", self._settings.robot_api.capture.include_depth, self._settings.robot_api.capture.return_mode)
         observation = self._robot_client.capture()
         rgb_data_url = self._materialize_asset_data_url(observation.rgb)
         if not rgb_data_url:
             raise ObservationError("capture returned no usable rgb image")
         depth_data_url = self._materialize_asset_data_url(observation.depth)
+        if structured_scene_required and not depth_data_url:
+            raise ObservationError("capture_missing_depth_data_for_structured_scene")
+        scene_understanding = None
+        if self._vision_client is not None and self._vision_client.enabled:
+            provisional_observation = CaptureObservation(
+                image_id=observation.image_id,
+                created_at=observation.created_at,
+                return_mode=observation.return_mode,
+                rgb=observation.rgb,
+                depth=observation.depth,
+                rgb_data_url=rgb_data_url,
+                depth_data_url=depth_data_url,
+                scene_understanding=None,
+                raw=observation.raw,
+            )
+            try:
+                scene_understanding = self._vision_client.understand_scene(provisional_observation)
+            except VisionServiceError:
+                if self._settings.vision.fail_closed:
+                    raise
+                self._logger.warning(
+                    "vision understanding unavailable, continue without structured scene understanding",
+                    exc_info=True,
+                )
         self._logger.info(
-            "capture ready: image_id=%s mode=%s rgb=%s depth=%s",
+            "capture ready: image_id=%s mode=%s rgb=%s depth=%s scene=%s",
             observation.image_id,
             observation.return_mode,
             bool(rgb_data_url),
             bool(depth_data_url),
+            scene_understanding is not None,
         )
         return CaptureObservation(
             image_id=observation.image_id,
@@ -35,6 +67,7 @@ class ObservationProvider:
             depth=observation.depth,
             rgb_data_url=rgb_data_url,
             depth_data_url=depth_data_url,
+            scene_understanding=scene_understanding,
             raw=observation.raw,
         )
 

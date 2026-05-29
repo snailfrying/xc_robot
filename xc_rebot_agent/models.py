@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime
+from urllib import parse as urllib_parse
 
 from .constants import ACTIVE_NAV_STATES, TERMINAL_NAV_STATES
 
@@ -113,15 +114,244 @@ class CaptureAsset:
     inline_data: str
 
     @classmethod
-    def from_api(cls, payload: dict[str, object] | None) -> "CaptureAsset | None":
+    def from_api(
+        cls,
+        payload: dict[str, object] | None,
+        *,
+        default_content_type: str = "",
+    ) -> "CaptureAsset | None":
+        if not isinstance(payload, dict):
+            return None
+        download_url = str(payload.get("download_url", "") or "").strip()
+        file_path = str(payload.get("file_path", "") or "").strip()
+        content_type = str(payload.get("content_type", "") or "").strip()
+        if not content_type:
+            content_type = _infer_content_type(
+                download_url=download_url,
+                file_path=file_path,
+                default_content_type=default_content_type,
+            )
+        return cls(
+            content_type=content_type,
+            download_url=download_url,
+            file_path=file_path,
+            inline_data=str(payload.get("inline_data", "") or "").strip(),
+        )
+
+
+@dataclass(frozen=True)
+class VisionBoundingBox:
+    x: float
+    y: float
+    w: float
+    h: float
+
+    @classmethod
+    def from_api(cls, payload: dict[str, object] | None) -> "VisionBoundingBox | None":
         if not isinstance(payload, dict):
             return None
         return cls(
-            content_type=str(payload.get("content_type", "") or "").strip(),
-            download_url=str(payload.get("download_url", "") or "").strip(),
-            file_path=str(payload.get("file_path", "") or "").strip(),
-            inline_data=str(payload.get("inline_data", "") or "").strip(),
+            x=float(payload.get("x", 0.0) or 0.0),
+            y=float(payload.get("y", 0.0) or 0.0),
+            w=float(payload.get("w", 0.0) or 0.0),
+            h=float(payload.get("h", 0.0) or 0.0),
         )
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "x": self.x,
+            "y": self.y,
+            "w": self.w,
+            "h": self.h,
+        }
+
+
+@dataclass(frozen=True)
+class VisionTarget:
+    label: str
+    confidence: float
+    track_id: str
+    bbox: VisionBoundingBox | None
+    center_depth_m: float | None
+    median_depth_m: float | None
+    min_depth_m: float | None
+    horizontal_offset_norm: float | None
+    vertical_offset_norm: float | None
+    raw: dict[str, object]
+
+    @classmethod
+    def from_api(cls, payload: dict[str, object] | None) -> "VisionTarget | None":
+        if not isinstance(payload, dict):
+            return None
+        return cls(
+            label=str(payload.get("label", "") or "").strip(),
+            confidence=float(payload.get("confidence", 0.0) or 0.0),
+            track_id=str(payload.get("track_id", "") or "").strip(),
+            bbox=VisionBoundingBox.from_api(payload.get("bbox")),
+            center_depth_m=_optional_float(payload.get("center_depth_m")),
+            median_depth_m=_optional_float(payload.get("median_depth_m")),
+            min_depth_m=_optional_float(payload.get("min_depth_m")),
+            horizontal_offset_norm=_optional_float(payload.get("horizontal_offset_norm")),
+            vertical_offset_norm=_optional_float(payload.get("vertical_offset_norm")),
+            raw=dict(payload),
+        )
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "label": self.label,
+            "confidence": self.confidence,
+            "track_id": self.track_id,
+            "bbox": self.bbox.to_dict() if self.bbox is not None else {},
+            "center_depth_m": self.center_depth_m,
+            "median_depth_m": self.median_depth_m,
+            "min_depth_m": self.min_depth_m,
+            "horizontal_offset_norm": self.horizontal_offset_norm,
+            "vertical_offset_norm": self.vertical_offset_norm,
+        }
+
+
+@dataclass(frozen=True)
+class VisionObstacleSummary:
+    forward_clearance_m: float | None
+    left_clearance_m: float | None
+    right_clearance_m: float | None
+    rear_clearance_m: float | None
+    raw: dict[str, object]
+
+    @classmethod
+    def from_api(cls, payload: dict[str, object] | None) -> "VisionObstacleSummary":
+        if not isinstance(payload, dict):
+            return cls(
+                forward_clearance_m=None,
+                left_clearance_m=None,
+                right_clearance_m=None,
+                rear_clearance_m=None,
+                raw={},
+            )
+        return cls(
+            forward_clearance_m=_optional_float(payload.get("forward_clearance_m")),
+            left_clearance_m=_optional_float(payload.get("left_clearance_m")),
+            right_clearance_m=_optional_float(payload.get("right_clearance_m")),
+            rear_clearance_m=_optional_float(payload.get("rear_clearance_m")),
+            raw=dict(payload),
+        )
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "forward_clearance_m": self.forward_clearance_m,
+            "left_clearance_m": self.left_clearance_m,
+            "right_clearance_m": self.right_clearance_m,
+            "rear_clearance_m": self.rear_clearance_m,
+        }
+
+
+@dataclass(frozen=True)
+class VisionSceneFlags:
+    safe_to_advance: bool | None
+    safe_to_retreat: bool | None
+    safe_to_rotate: bool | None
+    target_visible: bool | None
+    target_centered: bool | None
+    depth_reliable: bool | None
+    requires_caution: bool | None
+    raw: dict[str, object]
+
+    @classmethod
+    def from_api(cls, payload: dict[str, object] | None) -> "VisionSceneFlags":
+        if not isinstance(payload, dict):
+            return cls(
+                safe_to_advance=None,
+                safe_to_retreat=None,
+                safe_to_rotate=None,
+                target_visible=None,
+                target_centered=None,
+                depth_reliable=None,
+                requires_caution=None,
+                raw={},
+            )
+        return cls(
+            safe_to_advance=_optional_bool(payload.get("safe_to_advance")),
+            safe_to_retreat=_optional_bool(payload.get("safe_to_retreat")),
+            safe_to_rotate=_optional_bool(payload.get("safe_to_rotate")),
+            target_visible=_optional_bool(payload.get("target_visible")),
+            target_centered=_optional_bool(payload.get("target_centered")),
+            depth_reliable=_optional_bool(payload.get("depth_reliable")),
+            requires_caution=_optional_bool(payload.get("requires_caution")),
+            raw=dict(payload),
+        )
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "safe_to_advance": self.safe_to_advance,
+            "safe_to_retreat": self.safe_to_retreat,
+            "safe_to_rotate": self.safe_to_rotate,
+            "target_visible": self.target_visible,
+            "target_centered": self.target_centered,
+            "depth_reliable": self.depth_reliable,
+            "requires_caution": self.requires_caution,
+        }
+
+
+@dataclass(frozen=True)
+class VisualSceneUnderstanding:
+    summary: str
+    confidence: float
+    targets: tuple[VisionTarget, ...]
+    obstacles: VisionObstacleSummary
+    flags: VisionSceneFlags
+    recommended_action: str
+    recommended_profile_name: str
+    risk_reasons: tuple[str, ...]
+    raw: dict[str, object]
+
+    @classmethod
+    def from_api(cls, payload: dict[str, object] | None) -> "VisualSceneUnderstanding | None":
+        if not isinstance(payload, dict):
+            return None
+        targets_raw = payload.get("targets", [])
+        targets = ()
+        if isinstance(targets_raw, list):
+            parsed_targets = [VisionTarget.from_api(item) for item in targets_raw if isinstance(item, dict)]
+            targets = tuple(item for item in parsed_targets if item is not None)
+        risk_reasons_raw = payload.get("risk_reasons", [])
+        risk_reasons = ()
+        if isinstance(risk_reasons_raw, list):
+            risk_reasons = tuple(str(item).strip() for item in risk_reasons_raw if str(item).strip())
+        return cls(
+            summary=str(payload.get("summary", "") or "").strip(),
+            confidence=float(payload.get("confidence", 0.0) or 0.0),
+            targets=targets,
+            obstacles=VisionObstacleSummary.from_api(payload.get("obstacles")),
+            flags=VisionSceneFlags.from_api(payload.get("scene_flags")),
+            recommended_action=str(payload.get("recommended_action", "") or "").strip(),
+            recommended_profile_name=str(payload.get("recommended_profile_name", "") or "").strip(),
+            risk_reasons=risk_reasons,
+            raw=dict(payload),
+        )
+
+    @property
+    def primary_target(self) -> VisionTarget | None:
+        if not self.targets:
+            return None
+        return max(self.targets, key=lambda item: item.confidence)
+
+    def short_dict(self) -> dict[str, object]:
+        primary_target = self.primary_target
+        return {
+            "summary": self.summary,
+            "confidence": self.confidence,
+            "target_count": len(self.targets),
+            "primary_target_label": primary_target.label if primary_target is not None else "",
+            "primary_target_depth_m": primary_target.center_depth_m if primary_target is not None else None,
+            "forward_clearance_m": self.obstacles.forward_clearance_m,
+            "safe_to_advance": self.flags.safe_to_advance,
+            "safe_to_retreat": self.flags.safe_to_retreat,
+            "safe_to_rotate": self.flags.safe_to_rotate,
+            "target_visible": self.flags.target_visible,
+            "target_centered": self.flags.target_centered,
+            "recommended_action": self.recommended_action,
+            "risk_reasons": list(self.risk_reasons),
+        }
 
 
 @dataclass(frozen=True)
@@ -133,6 +363,7 @@ class CaptureObservation:
     depth: CaptureAsset | None
     rgb_data_url: str
     depth_data_url: str
+    scene_understanding: VisualSceneUnderstanding | None
     raw: dict[str, object]
 
     def short_dict(self) -> dict[str, object]:
@@ -142,6 +373,7 @@ class CaptureObservation:
             "return_mode": self.return_mode,
             "has_rgb": bool(self.rgb_data_url),
             "has_depth": bool(self.depth_data_url),
+            "has_scene_understanding": self.scene_understanding is not None,
         }
 
 
@@ -275,3 +507,25 @@ class ExecutionResult:
             status_after=status_after,
             events=tuple(events),
         )
+
+
+def _optional_float(value: object) -> float | None:
+    if value in (None, ""):
+        return None
+    return float(value)
+
+
+def _optional_bool(value: object) -> bool | None:
+    if value in (None, ""):
+        return None
+    return bool(value)
+
+
+def _infer_content_type(*, download_url: str, file_path: str, default_content_type: str) -> str:
+    candidate = file_path or download_url
+    path = urllib_parse.urlparse(candidate).path.lower() if candidate else ""
+    if path.endswith(".png") or path.endswith("/depth"):
+        return "image/png"
+    if path.endswith(".jpg") or path.endswith(".jpeg") or path.endswith("/rgb"):
+        return "image/jpeg"
+    return default_content_type

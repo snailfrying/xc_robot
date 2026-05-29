@@ -4,6 +4,7 @@ from datetime import datetime
 
 from ..clients.llm_client import OpenAICompatibleClient
 from ..clients.robot_api import RobotApiClient
+from ..clients.vision_service import VisionUnderstandingClient
 from ..errors import ActionExecutionError
 from ..errors import ObservationError
 from ..errors import PlannerError
@@ -39,6 +40,10 @@ class ReactAgent:
             settings=settings,
             logger=get_component_logger(logger, "client.llm"),
         )
+        self._vision_client = VisionUnderstandingClient(
+            settings=settings,
+            logger=get_component_logger(logger, "client.vision"),
+        )
         self._point_resolver = PointResolver(
             settings=settings,
             llm_client=self._llm_client,
@@ -63,6 +68,7 @@ class ReactAgent:
         self._observer = ObservationProvider(
             settings=settings,
             robot_client=self._robot_client,
+            vision_client=self._vision_client,
             logger=get_component_logger(logger, "runtime.observer"),
         )
 
@@ -275,6 +281,7 @@ class ReactAgent:
                         decision.action,
                         session_id=session_id,
                         step_index=step_index,
+                        observation=observation,
                     )
                 except (ActionExecutionError, ObservationError, RobotApiError, RobotProtocolError, XcRebotError) as exc:
                     self._logger.error(
@@ -402,41 +409,21 @@ class ReactAgent:
         return final_summary
 
     def _capture_observation_for_planning(self, *, profile_name: str, subgoal, session_id: str, step_index: int):
-        requires_visual_observation = profile_name == "scene_exploration"
-        if not self._settings.planner.allow_vlm_exploration:
-            if requires_visual_observation:
-                raise ObservationError("scene_exploration_requires_visual_observation_but_capture_disabled")
+        requires_visual_observation = profile_name in {"scene_exploration", "motion_sequence"}
+        if not requires_visual_observation:
             return None
-        try:
-            observation = self._observer.capture_scene()
-            self._trace_writer.write(
-                "observation_ready",
-                {
-                    "session_id": session_id,
-                    "step_index": step_index,
-                    "subgoal": subgoal.to_trace(),
-                    "observation": observation.short_dict(),
-                },
-            )
-            return observation
-        except ObservationError as exc:
-            if requires_visual_observation:
-                raise
-            self._logger.warning(
-                "observation skipped after capture failure: session_id=%s step=%s sequence_id=%s profile=%s error=%s",
-                session_id,
-                step_index,
-                subgoal.sequence_id,
-                profile_name,
-                exc,
-            )
-            self._trace_writer.write(
-                "observation_skipped",
-                {
-                    "session_id": session_id,
-                    "step_index": step_index,
-                    "subgoal": subgoal.to_trace(),
-                    "error": str(exc),
-                },
-            )
-            return None
+        if profile_name == "scene_exploration" and not self._settings.planner.allow_vlm_exploration:
+            raise ObservationError("scene_exploration_requires_visual_observation_but_capture_disabled")
+        if profile_name == "motion_sequence" and not self._settings.planner.allow_vlm_motion:
+            raise ObservationError("motion_sequence_requires_visual_observation_but_capture_disabled")
+        observation = self._observer.capture_scene()
+        self._trace_writer.write(
+            "observation_ready",
+            {
+                "session_id": session_id,
+                "step_index": step_index,
+                "subgoal": subgoal.to_trace(),
+                "observation": observation.short_dict(),
+            },
+        )
+        return observation
